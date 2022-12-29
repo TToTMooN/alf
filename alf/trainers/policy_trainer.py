@@ -23,13 +23,13 @@ import sys
 import time
 import torch
 import torch.nn as nn
-
+import numpy as np
 import alf
 from alf.algorithms.algorithm import Algorithm
 from alf.algorithms.config import TrainerConfig
 from alf.algorithms.data_transformer import create_data_transformer
 from alf.data_structures import StepType
-from alf.environments.utils import create_environment
+from alf.environments.utils import create_environment, create_eval_environment
 from alf.nest import map_structure
 from alf.tensor_specs import TensorSpec
 from alf.utils import common
@@ -133,6 +133,8 @@ class Trainer(object):
     def train(self):
         """Perform training."""
         self._restore_checkpoint()
+        if self._config.ext_root_dir is not None:
+            self._restore_checkpoint_from_external()
         alf.summary.enable_summary()
 
         self._checkpoint_requested = False
@@ -196,7 +198,7 @@ class Trainer(object):
 
     @staticmethod
     def current_env_steps():
-        return Trainer._trainer_progress._env_step
+        return Trainer._trainer_progress._env_steps
 
     def _train(self):
         """Perform training according the the learning type. """
@@ -280,6 +282,70 @@ class Trainer(object):
 
         self._checkpointer = checkpointer
 
+    def _restore_checkpoint_from_external(self):
+        print("**********BEGIN RESTORE FROM EXTERNAL ROOT DIR*************")
+        ext_root_dir = self._config.ext_root_dir
+        ext_train_dir = os.path.join(ext_root_dir, 'train')
+        print("Recover from: ", ext_train_dir)
+        checkpointer = Checkpointer(
+            ckpt_dir=os.path.join(ext_train_dir, 'algorithm'),
+            algorithm=self._algorithm,
+        )
+
+        if checkpointer.has_checkpoint():
+            # Some objects (e.g. ReplayBuffer) are constructed lazily in algorithm.
+            # They only appear after one training iteration. So we need to run
+            # train_iter() once before loading the checkpoint
+            self._algorithm.train_iter()
+
+        try:
+            checkpoint = checkpointer.load(
+                including_optimizer=False, return_ckpt=True)
+            alg_dict = checkpoint['algorithm']
+            transfer_dict = {
+                k.replace('_actor_network.', ''): alg_dict[k]
+                for k in alg_dict
+                if ("_actor_network" in k and "_task_encoding" not in k)
+            }
+            task_weight_dict = {
+                k.replace('_actor_network.', ''): alg_dict[k]
+                for k in alg_dict if "task_encoding" in k
+            }
+            task_weight_key = list(task_weight_dict.keys())[0]
+            num_of_task_transfer = task_weight_dict[task_weight_key].shape[1]
+
+            interpolate_weight = torch.rand(
+                (self._algorithm._num_of_tasks,
+                 num_of_task_transfer))  # num_extreme, num_of_normal
+
+            interpolate_weight = torch.nn.functional.normalize(
+                interpolate_weight, p=1, dim=-1)
+
+            new_weight = task_weight_dict[
+                task_weight_key] @ interpolate_weight.T
+            task_weight_dict[task_weight_key] = new_weight
+            transfer_dict.update(task_weight_dict)
+            self._algorithm._actor_network.load_state_dict(
+                transfer_dict, strict=False)
+        except RuntimeError as e:
+            raise RuntimeError((
+                "Checkpoint loading failed from the external ext_root_dir={}. "
+                "Typically this is caused by using a wrong checkpoint. \n"
+                "Please make sure the ext_root_dir is set correctly. "
+                "Use a new value for it if "
+                "planning to train from scratch. \n"
+                "Detailed error message: {}").format(ext_root_dir, e))
+        # self._reset_task_encoding_network(self._algorithm)
+        print("**********END RESTORE FROM EXTERNAL ROOT DIR*************")
+
+    def _reset_task_encoding_network(self, alg):
+        if type(alg._task_encoding_network
+                ) == alf.networks.encoding_networks.TaskEncodingNetwork:
+            for fc in alg._task_encoding_network._fc_layers:
+                fc.reset_parameters()
+            print(
+                "**************RESET TASK ENCODING NETWORK******************")
+
 
 class RLTrainer(Trainer):
     """Trainer for reinforcement learning. """
@@ -335,7 +401,7 @@ class RLTrainer(Trainer):
         # (ParallelAlfEnvironment and ThreadEnvironment) for details.
         if config.no_thread_env_for_conf:
             if self._evaluate:
-                self._eval_env = create_environment(
+                self._eval_env = create_eval_environment(
                     num_parallel_environments=1, seed=self._random_seed)
         else:
             if self._evaluate or isinstance(
@@ -344,11 +410,14 @@ class RLTrainer(Trainer):
                 self._thread_env = create_environment(
                     nonparallel=True, seed=self._random_seed)
             if self._evaluate:
-                self._eval_env = self._thread_env
+                self._eval_env = create_eval_environment(
+                    nonparallel=True, seed=self._random_seed)
 
         self._eval_metrics = None
         self._eval_summary_writer = None
         if self._evaluate:
+            self._eval_env = create_eval_environment(
+                nonparallel=True, seed=self._random_seed)
             self._eval_metrics = [
                 alf.metrics.AverageReturnMetric(
                     buffer_size=self._num_eval_episodes,

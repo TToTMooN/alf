@@ -424,6 +424,31 @@ class FC(nn.Module):
             y = self._bn(y)
         return self._activation(y)
 
+    def group_foward(self, inputs, input_groups, output_groups):
+        assert (len(input_groups) == len(output_groups))
+        group_num = len(input_groups)
+        y_list = []
+        for i in range(group_num):
+            inputs_i = inputs[..., input_groups[i]]
+            yi = inputs_i.matmul(
+                self._weight[output_groups[i], :][:, input_groups[i]].t())
+            y_list.append(yi)
+        y = torch.cat(y_list, dim=-1)
+        output_index_order = torch.LongTensor(sum(output_groups,
+                                                  [])).to(y.device)
+        y = torch.index_select(y, -1, torch.argsort(output_index_order))
+        if self._use_bias:
+            y += self._bias
+        if self._use_ln:
+            if not self._use_bias:
+                self._ln.bias.data.zero_()
+            y = self._ln(y)
+        if self._use_bn:
+            if not self._use_bias:
+                self._bn.bias.data.zero_()
+            y = self._bn(y)
+        return self._activation(y)
+
     @property
     def weight(self):
         return self._weight
@@ -747,6 +772,7 @@ class CompositionalFC(nn.Module):
                  use_bn=False,
                  use_ln=False,
                  kernel_initializer=None,
+                 kernel_identical_init=False,
                  kernel_init_gain=1.0,
                  bias_init_value=0.0):
         """
@@ -788,6 +814,7 @@ class CompositionalFC(nn.Module):
 
         self._kernel_initializer = kernel_initializer
         self._kernel_init_gain = kernel_init_gain
+        self._kernel_identical_init = kernel_identical_init
         self._bias_init_value = bias_init_value
         self._output_comp_weight = output_comp_weight
         self._use_bias = use_bias
@@ -874,14 +901,26 @@ class CompositionalFC(nn.Module):
 
     def reset_parameters(self):
         """Initialize the parameters."""
-        for i in range(self._n):
+        if self._kernel_identical_init:
             if self._kernel_initializer is None:
                 variance_scaling_init(
-                    self._weight.data[i],
+                    self._weight.data[0],
                     gain=self._kernel_init_gain,
                     nonlinearity=self._activation)
             else:
-                self._kernel_initializer(self._weight.data[i])
+                self._kernel_initializer(self._weight.data[0])
+            for i in range(1, self._n):
+                with torch.no_grad():
+                    self._weight.data[i].copy_(self._weight.data[0])
+        else:
+            for i in range(self._n):
+                if self._kernel_initializer is None:
+                    variance_scaling_init(
+                        self._weight.data[i],
+                        gain=self._kernel_init_gain,
+                        nonlinearity=self._activation)
+                else:
+                    self._kernel_initializer(self._weight.data[i])
 
         if self._use_bias:
             nn.init.constant_(self._bias.data, self._bias_init_value)

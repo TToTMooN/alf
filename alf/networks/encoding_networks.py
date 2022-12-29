@@ -1062,3 +1062,349 @@ class LSTMEncodingNetwork(Network):
     @property
     def state_spec(self):
         return self._state_spec
+
+
+@alf.configurable
+class CompositionalEncodingNetwork(PreprocessorNetwork):
+    """Feed Forward network with CNN and compositional FC layers which allows the last layer
+    to have different settings from the other layers.
+    """
+
+    def __init__(self,
+                 input_tensor_spec,
+                 num_of_param_set,
+                 output_tensor_spec=None,
+                 input_preprocessors=None,
+                 preprocessing_combiner=None,
+                 conv_layer_params=None,
+                 fc_layer_params=None,
+                 activation=torch.relu_,
+                 kernel_initializer=None,
+                 use_fc_bn=False,
+                 last_layer_size=None,
+                 last_activation=None,
+                 last_kernel_initializer=None,
+                 last_use_fc_bn=False,
+                 name="CompositionalEncodingNetwork"):
+        """Comments
+        """
+        super().__init__(
+            input_tensor_spec,
+            input_preprocessors,
+            preprocessing_combiner,
+            name=name)
+
+        if kernel_initializer is None:
+            kernel_initializer = functools.partial(
+                variance_scaling_init,
+                mode='fan_in',
+                distribution='truncated_normal',
+                nonlinearity=activation)
+
+        self._img_encoding_net = None
+        if conv_layer_params:
+            assert isinstance(conv_layer_params, tuple), \
+                "The input params {} should be tuple".format(conv_layer_params)
+            assert len(self._processed_input_tensor_spec.shape) == 3, \
+                "The input shape {} should be like (C,H,W)!".format(
+                    self._processed_input_tensor_spec.shape)
+            input_channels, height, width = self._processed_input_tensor_spec.shape
+            self._img_encoding_net = ImageEncodingNetwork(
+                input_channels, (height, width),
+                conv_layer_params,
+                activation=activation,
+                kernel_initializer=kernel_initializer,
+                flatten_output=True)
+            input_size = self._img_encoding_net.output_spec.shape[0]
+        else:
+            assert self._processed_input_tensor_spec.ndim == 1, \
+                "The input shape {} should be like (N,)!".format(
+                    self._processed_input_tensor_spec.shape)
+            input_size = self._processed_input_tensor_spec.shape[0]
+        self._num_of_param_set = num_of_param_set
+        self._comp_fc_layers = nn.ModuleList()
+        if fc_layer_params is None:
+            fc_layer_params = []
+        else:
+            assert isinstance(fc_layer_params, tuple)
+            fc_layer_params = list(fc_layer_params)
+
+        for size in fc_layer_params:
+            self._comp_fc_layers.append(
+                layers.CompositionalFC(
+                    input_size,
+                    size,
+                    n=num_of_param_set,
+                    output_comp_weight=False,
+                    activation=activation,
+                    use_bn=use_fc_bn,
+                    kernel_initializer=kernel_initializer))
+            input_size = size
+
+        if last_layer_size is not None or last_activation is not None:
+            assert last_layer_size is not None and last_activation is not None, \
+            "Both last_layer_size and last_activation need to be specified!"
+
+            if last_kernel_initializer is None:
+                common.warning_once(
+                    "last_kernel_initializer is not specified "
+                    "for the last layer of size {}.".format(last_layer_size))
+                last_kernel_initializer = kernel_initializer
+
+            self._comp_fc_layers.append(
+                layers.CompositionalFC(
+                    input_size,
+                    last_layer_size,
+                    n=num_of_param_set,
+                    output_comp_weight=False,
+                    activation=last_activation,
+                    use_bn=last_use_fc_bn,
+                    kernel_initializer=last_kernel_initializer))
+            input_size = last_layer_size
+
+        if output_tensor_spec is not None:
+            assert output_tensor_spec.numel == input_size, (
+                "network output "
+                "size {a} is inconsisent with specified out_tensor_spec "
+                "of size {b}".format(a=input_size, b=output_tensor_spec.numel))
+            self._output_spec = TensorSpec(
+                output_tensor_spec.shape,
+                dtype=self._processed_input_tensor_spec.dtype)
+            self._reshape_output = True
+        else:
+            self._output_spec = TensorSpec(
+                (input_size, ), dtype=self._processed_input_tensor_spec.dtype)
+            self._reshape_output = False
+
+    def forward(self, inputs, state=()):
+        """
+        Args:
+            inputs[0] (nested Tensor), inputs[1] (comp weights)
+        """
+        assert type(inputs) == tuple, (
+            "Expecting tuple inputs of (inputs, comp_weight)")
+        comp_weight = inputs[1]
+        inputs = inputs[0]
+        # call super to preprocess inputs
+        z, state = super().forward(inputs, state)
+        if self._img_encoding_net is not None:
+            z, _ = self._img_encoding_net(z)
+        if alf.summary.should_summarize_output():
+            name = ('summarize_output/' + self.name + '.fc.0.' + 'input_norm.'
+                    + common.exe_mode_name())
+            alf.summary.scalar(
+                name=name, data=torch.mean(z.norm(dim=list(range(1, z.ndim)))))
+        i = 0
+        for fc in self._comp_fc_layers:
+            z = fc((z, comp_weight))
+            if alf.summary.should_summarize_output():
+                name = ('summarize_output/' + self.name + '.fc.' + str(i) +
+                        '.output_norm.' + common.exe_mode_name())
+                alf.summary.scalar(
+                    name=name,
+                    data=torch.mean(z.norm(dim=list(range(1, z.ndim)))))
+            i += 1
+
+        if self._reshape_output:
+            z = z.reshape(z.shape[0], *self._output_spec.shape)
+        return z, state
+
+    def make_parallel(self, n):
+        """Make a parallelized version of this network.
+
+        A parallel network has ``n`` copies of network with the same structure but
+        different independently initialized parameters.
+
+        For supported network structures (currently, networks with only FC layers)
+        it will create ``ParallelEncodingNetwork`` (PEN). Otherwise, it will
+        create a ``NaiveParallelNetwork`` (NPN). However, PEN is not always
+        faster than NPN. Especially for small ``n`` and large batch_size. See
+        ``test_make_parallel()`` in critic_networks_test.py for detail.
+
+        Returns:
+            Network: A parallel network
+        """
+        if (self.saved_args.get('input_preprocessors') is None and isinstance(
+                self._preprocessing_combiner,
+            (alf.layers.Identity, alf.layers.NestSum, alf.layers.NestConcat))):
+            parallel_enc_net_args = dict(**self.saved_args)
+            parallel_enc_net_args.update(n=n, name="parallel_" + self.name)
+            return ParallelEncodingNetwork(**parallel_enc_net_args)
+        else:
+            common.warning_once(
+                " ``NaiveParallelNetwork`` is used by ``make_parallel()`` !")
+            return super().make_parallel(n)
+
+
+@alf.configurable
+class TaskEncodingNetwork(PreprocessorNetwork):
+    """One layer FC which assigns a weight of output dimension for each onehot task embedding.
+    """
+
+    def __init__(self,
+                 input_tensor_spec,
+                 output_tensor_spec=None,
+                 input_preprocessors=None,
+                 preprocessing_combiner=None,
+                 fc_layer_params=None,
+                 activation=torch.relu_,
+                 kernel_initializer=None,
+                 use_bias=False,
+                 use_fc_bn=False,
+                 last_layer_size=None,
+                 last_activation=None,
+                 last_kernel_initializer=None,
+                 last_use_fc_bn=False,
+                 custom_fc_init=None,
+                 task_groups=None,
+                 param_groups=None,
+                 name="TaskEncodingNetwork"):
+
+        super().__init__(
+            input_tensor_spec,
+            input_preprocessors,
+            preprocessing_combiner,
+            name=name)
+        self._task_groups = task_groups
+        self._param_groups = param_groups
+
+        if kernel_initializer is None:
+            kernel_initializer = functools.partial(
+                variance_scaling_init,
+                mode='fan_in',
+                distribution='truncated_normal',
+                nonlinearity=activation)
+
+        assert self._processed_input_tensor_spec.ndim == 1, \
+            "The input shape {} should be like (N,)!".format(
+                self._processed_input_tensor_spec.shape)
+        input_size = self._processed_input_tensor_spec.shape[0]
+
+        self._fc_layers = nn.ModuleList()
+        if fc_layer_params is None:
+            fc_layer_params = []
+        else:
+            assert isinstance(fc_layer_params, tuple)
+            fc_layer_params = list(fc_layer_params)
+
+        for size in fc_layer_params:
+            self._fc_layers.append(
+                layers.FC(
+                    input_size,
+                    size,
+                    activation=activation,
+                    use_bn=use_fc_bn,
+                    kernel_initializer=kernel_initializer))
+            input_size = size
+        self._last_activation = None
+        if last_layer_size is not None or last_activation is not None:
+            assert last_layer_size is not None and last_activation is not None, \
+            "Both last_layer_size and last_activation need to be specified!"
+            self._last_activation = last_activation
+            if last_kernel_initializer is None:
+                if custom_fc_init is None:
+                    common.warning_once(
+                        "last_kernel_initializer is not specified "
+                        "for the last layer of size {}.".format(
+                            last_layer_size))
+                last_kernel_initializer = torch.nn.init.normal_
+
+            self._fc_layers.append(
+                layers.FC(
+                    input_size,
+                    last_layer_size,
+                    activation=last_activation,
+                    use_bn=last_use_fc_bn,
+                    use_bias=use_bias,
+                    kernel_initializer=last_kernel_initializer))
+            if custom_fc_init is not None:
+                out_s, in_s = custom_fc_init.shape
+                assert (in_s==input_size and out_s==last_layer_size), \
+                    "custom last layer init size incorrect, should be {}".format(
+                        (input_size, last_layer_size))
+                with torch.no_grad():
+                    self._fc_layers[-1]._weight.copy_(custom_fc_init)
+                if last_activation is torch.nn.functional.softmax:
+                    common.warning_once(
+                        "softmax may affect the custom init you set.")
+                print("CUSTOM WEIGHT IS:", custom_fc_init)
+            input_size = last_layer_size
+
+        if output_tensor_spec is not None:
+            assert output_tensor_spec.numel == input_size, (
+                "network output "
+                "size {a} is inconsisent with specified out_tensor_spec "
+                "of size {b}".format(a=input_size, b=output_tensor_spec.numel))
+            self._output_spec = TensorSpec(
+                output_tensor_spec.shape,
+                dtype=self._processed_input_tensor_spec.dtype)
+            self._reshape_output = True
+        else:
+            self._output_spec = TensorSpec(
+                (input_size, ), dtype=self._processed_input_tensor_spec.dtype)
+            self._reshape_output = False
+
+    def forward(self, inputs, state=()):
+        """
+        Args:
+            inputs (nested Tensor):
+        """
+        # call super to preprocess inputs
+        z, state = super().forward(inputs, state)
+        if alf.summary.should_summarize_output():
+            name = ('summarize_output/' + self.name + '.fc.0.' + 'input_norm.'
+                    + common.exe_mode_name())
+            alf.summary.scalar(
+                name=name, data=torch.mean(z.norm(dim=list(range(1, z.ndim)))))
+        i = 0
+        if len(self.
+               _fc_layers) == 1 and self._task_groups and self._param_groups:
+            # only one layer, input: num_task, output: num_param_groups
+            z = self._fc_layers[-1].group_foward(z, self._task_groups,
+                                                 self._param_groups)
+            if alf.summary.should_summarize_output():
+                name = ('summarize_output/' + self.name + '.fc.' + str(i) +
+                        '.output_norm.' + common.exe_mode_name())
+                alf.summary.scalar(
+                    name=name,
+                    data=torch.mean(z.norm(dim=list(range(1, z.ndim)))))
+        else:
+            for fc in self._fc_layers:
+                z = fc(z)
+                if alf.summary.should_summarize_output():
+                    name = ('summarize_output/' + self.name + '.fc.' + str(i) +
+                            '.output_norm.' + common.exe_mode_name())
+                    alf.summary.scalar(
+                        name=name,
+                        data=torch.mean(z.norm(dim=list(range(1, z.ndim)))))
+                i += 1
+
+        if self._reshape_output:
+            z = z.reshape(z.shape[0], *self._output_spec.shape)
+        return z, state
+
+    def make_parallel(self, n):
+        """Make a parallelized version of this network.
+
+        A parallel network has ``n`` copies of network with the same structure but
+        different independently initialized parameters.
+
+        For supported network structures (currently, networks with only FC layers)
+        it will create ``ParallelEncodingNetwork`` (PEN). Otherwise, it will
+        create a ``NaiveParallelNetwork`` (NPN). However, PEN is not always
+        faster than NPN. Especially for small ``n`` and large batch_size. See
+        ``test_make_parallel()`` in critic_networks_test.py for detail.
+
+        Returns:
+            Network: A parallel network
+        """
+        if (self.saved_args.get('input_preprocessors') is None and isinstance(
+                self._preprocessing_combiner,
+            (alf.layers.Identity, alf.layers.NestSum, alf.layers.NestConcat))):
+            parallel_enc_net_args = dict(**self.saved_args)
+            parallel_enc_net_args.update(n=n, name="parallel_" + self.name)
+            return ParallelEncodingNetwork(**parallel_enc_net_args)
+        else:
+            common.warning_once(
+                " ``NaiveParallelNetwork`` is used by ``make_parallel()`` !")
+            return super().make_parallel(n)

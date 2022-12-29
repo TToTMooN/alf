@@ -1015,8 +1015,6 @@ class Algorithm(AlgorithmInterface):
 
         unhandled = self._setup_optimizers()
         unhandled = [self._param_to_name[p] for p in unhandled]
-        assert not unhandled, ("'%s' has some modules/parameters do not have "
-                               "optimizer: %s" % (self.name, unhandled))
         optimizers = self.optimizers()
         for optimizer in optimizers:
             optimizer.zero_grad(set_to_none=True)

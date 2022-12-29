@@ -26,7 +26,12 @@ from alf.initializers import variance_scaling_init
 from alf.tensor_specs import TensorSpec
 
 from .network import Network
-from .encoding_networks import EncodingNetwork, LSTMEncodingNetwork, ParallelEncodingNetwork
+from .encoding_networks import CompositionalEncodingNetwork, EncodingNetwork, TaskEncodingNetwork, LSTMEncodingNetwork, ParallelEncodingNetwork
+from functools import partial
+
+
+def _hook(grad, name):
+    alf.summary.scalar("ALG_NAME/" + name, grad.norm())
 
 
 def _check_action_specs_for_critic_networks(
@@ -396,3 +401,195 @@ class CriticRNNNetwork(Network):
     @property
     def state_spec(self):
         return self._lstm_encoding_net.state_spec
+
+
+@alf.configurable
+class CriticCompositionalNetwork(Network):
+    def __init__(self,
+                 input_tensor_spec,
+                 num_of_param_set,
+                 task_encoding_net=None,
+                 use_compositional_encoding=True,
+                 use_task_input=False,
+                 output_tensor_spec=TensorSpec(()),
+                 observation_input_processors=None,
+                 observation_preprocessing_combiner=None,
+                 task_preprocessing_combiner=None,
+                 observation_conv_layer_params=None,
+                 observation_fc_layer_params=None,
+                 task_fc_layer_params=None,
+                 action_input_processors=None,
+                 action_preprocessing_combiner=None,
+                 action_fc_layer_params=None,
+                 joint_fc_layer_params=None,
+                 activation=torch.relu_,
+                 kernel_initializer=None,
+                 use_fc_bn=False,
+                 compositional_initializer=nn.init.orthogonal_,
+                 name="CompositionalCriticNetwork"):
+
+        super().__init__(input_tensor_spec, name=name)
+
+        if kernel_initializer is None:
+            kernel_initializer = functools.partial(
+                variance_scaling_init,
+                gain=math.sqrt(1.0 / 3),
+                mode='fan_in',
+                distribution='uniform')
+
+        observation_spec, action_spec = input_tensor_spec
+        self._use_compositional_encoding = use_compositional_encoding
+        self._use_task_input = use_task_input
+        self._num_of_param_set = num_of_param_set
+        # Task encoding, output Batch x num_of_param_set
+        if task_encoding_net is not None:
+            self._task_encoding_net = task_encoding_net
+        else:
+            self._task_encoding_net = TaskEncodingNetwork(
+                input_tensor_spec=observation_spec,
+                input_preprocessors=observation_input_processors,
+                preprocessing_combiner=task_preprocessing_combiner,
+                fc_layer_params=task_fc_layer_params,
+                activation=activation,
+                last_layer_size=num_of_param_set,
+                last_activation=torch.nn.functional.softmax,
+                kernel_initializer=kernel_initializer,
+                last_kernel_initializer=compositional_initializer,
+                use_fc_bn=use_fc_bn)
+        # Observation encoder
+        if use_compositional_encoding:
+            self._obs_encoder = CompositionalEncodingNetwork(
+                observation_spec,
+                num_of_param_set,
+                input_preprocessors=observation_input_processors,
+                preprocessing_combiner=observation_preprocessing_combiner,
+                conv_layer_params=observation_conv_layer_params,
+                fc_layer_params=observation_fc_layer_params,
+                activation=activation,
+                kernel_initializer=kernel_initializer,
+                use_fc_bn=use_fc_bn,
+                name=self.name + ".obs_encoder")
+        else:
+            self._obs_encoder = EncodingNetwork(
+                observation_spec,
+                input_preprocessors=observation_input_processors,
+                preprocessing_combiner=observation_preprocessing_combiner,
+                conv_layer_params=observation_conv_layer_params,
+                fc_layer_params=observation_fc_layer_params,
+                activation=activation,
+                kernel_initializer=kernel_initializer,
+                use_fc_bn=use_fc_bn,
+                name=self.name + ".obs_encoder")
+
+        _check_action_specs_for_critic_networks(action_spec,
+                                                action_input_processors,
+                                                action_preprocessing_combiner)
+        last_kernel_initializer = functools.partial(
+            torch.nn.init.uniform_, a=-0.003, b=0.003)
+        # Action encoder
+        if use_compositional_encoding:
+            self._action_encoder = CompositionalEncodingNetwork(
+                action_spec,
+                num_of_param_set,
+                input_preprocessors=action_input_processors,
+                preprocessing_combiner=action_preprocessing_combiner,
+                fc_layer_params=action_fc_layer_params,
+                activation=activation,
+                kernel_initializer=kernel_initializer,
+                use_fc_bn=use_fc_bn,
+                name=self.name + ".action_encoder")
+        else:
+            self._action_encoder = EncodingNetwork(
+                action_spec,
+                input_preprocessors=action_input_processors,
+                preprocessing_combiner=action_preprocessing_combiner,
+                fc_layer_params=action_fc_layer_params,
+                activation=activation,
+                kernel_initializer=kernel_initializer,
+                use_fc_bn=use_fc_bn,
+                name=self.name + ".action_encoder")
+        # Joint encoder
+        if self._use_task_input:
+            joint_encoder_input_spec = TensorSpec(
+                (self._obs_encoder.output_spec.shape[0] +
+                 self._action_encoder.output_spec.shape[0] +
+                 self._task_encoding_net.output_spec.shape[0], ))
+        else:
+            joint_encoder_input_spec = TensorSpec(
+                (self._obs_encoder.output_spec.shape[0] +
+                 self._action_encoder.output_spec.shape[0], ))
+
+        if use_compositional_encoding:
+            self._joint_encoder = CompositionalEncodingNetwork(
+                joint_encoder_input_spec,
+                num_of_param_set,
+                fc_layer_params=joint_fc_layer_params,
+                activation=activation,
+                kernel_initializer=kernel_initializer,
+                last_layer_size=output_tensor_spec.numel,
+                last_activation=math_ops.identity,
+                use_fc_bn=use_fc_bn,
+                last_kernel_initializer=last_kernel_initializer,
+                name=self.name + ".joint_encoder")
+        else:
+            self._joint_encoder = EncodingNetwork(
+                joint_encoder_input_spec,
+                fc_layer_params=joint_fc_layer_params,
+                activation=activation,
+                kernel_initializer=kernel_initializer,
+                last_layer_size=output_tensor_spec.numel,
+                last_activation=math_ops.identity,
+                use_fc_bn=use_fc_bn,
+                last_kernel_initializer=last_kernel_initializer,
+                name=self.name + ".joint_encoder")
+
+        self._output_spec = output_tensor_spec
+        self._reduced_module = nn.ModuleList(
+            [self._joint_encoder, self._action_encoder, self._obs_encoder])
+
+    def forward(self, inputs, state=()):
+        """Computes action-value given an observation.
+
+        Args:
+            inputs:  A tuple of Tensors consistent with ``input_tensor_spec``
+            state: empty for API consistent with ``CriticRNNNetwork``
+
+        Returns:
+            tuple:
+            - action_value (torch.Tensor): a tensor of the size ``[batch_size]``
+            - state: empty
+        """
+        observations, actions = inputs
+        task_encoding, task_state = self._task_encoding_net(
+            observations, state)
+        w_for_input = task_encoding.clone()
+        w_for_input.register_hook(partial(_hook, name="w_for_input"))
+
+        w_for_param = task_encoding.clone()
+        w_for_param.register_hook(partial(_hook, name="w_for_param"))
+        # and use w_for_param to compute the compositional theta
+        if self._use_compositional_encoding:
+            obs_inputs = (observations, w_for_param)
+            encoded_obs, _ = self._obs_encoder(obs_inputs, state)
+            action_inputs = (actions, w_for_param)
+            encoded_action, _ = self._action_encoder(action_inputs, state)
+            if self._use_task_input:
+                joint = torch.cat([encoded_obs, encoded_action, w_for_input],
+                                  -1)
+            else:
+                joint = torch.cat([encoded_obs, encoded_action], -1)
+            joint_inputs = (joint, w_for_param)
+            action_value, _ = self._joint_encoder(joint_inputs)
+        else:
+            encoded_obs, _ = self._obs_encoder(observations)
+            encoded_action, _ = self._action_encoder(actions)
+            if self._use_task_input:
+                joint = torch.cat([encoded_obs, encoded_action, w_for_input],
+                                  -1)
+            else:
+                joint = torch.cat([encoded_obs, encoded_action], -1)
+            action_value, _ = self._joint_encoder(joint)
+
+        action_value = action_value.reshape(action_value.shape[0],
+                                            *self._output_spec.shape)
+        return action_value, state

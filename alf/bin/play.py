@@ -70,7 +70,9 @@ def _define_flags():
     flags.DEFINE_string('gin_file', None, 'Path to the gin-config file.')
     flags.DEFINE_multi_string('gin_param', None, 'Gin binding parameters.')
     flags.DEFINE_string('conf', None, 'Path to the alf config file.')
-    flags.DEFINE_multi_string('conf_param', None, 'Config binding parameters.')
+    flags.DEFINE_multi_string('conf_param',
+                              ["create_environment.nonparallel=True"],
+                              'Config binding parameters.')
     flags.DEFINE_string(
         'ignored_parameter_prefixes', "",
         "Comma separated strings to ingore the parameters whose name has one of "

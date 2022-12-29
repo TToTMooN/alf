@@ -286,6 +286,21 @@ class EnvironmentStepsReturnReader(MeanCurveReader):
         return "Average Episodic Return"
 
 
+class EnvironmentStepsEpisodeSucessReader(MeanCurveReader):
+    """Create a mean curve reader that reads Episode Sucess values."""
+
+    def _get_metric_name(self):
+        return "Metrics_vs_EnvironmentSteps/episode_success"
+
+    @property
+    def x_label(self):
+        return "Environment Steps"
+
+    @property
+    def y_label(self):
+        return "Average Success Rate"
+
+
 class EnvironmentStepsSuccessReader(MeanCurveReader):
     """Create a mean curve reader that reads Success rates."""
 

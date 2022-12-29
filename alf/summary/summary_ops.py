@@ -123,6 +123,8 @@ def images(name, data, dataformat='NCHW', step=None, walltime=None):
         walltime (float): Optional override default walltime (time.time())
             seconds after epoch of event
     """
+    if step is None:
+        step = _global_counter
     _summary_writer_stack[-1].add_images(
         name, data, step, walltime=walltime, dataformats=dataformat)
 

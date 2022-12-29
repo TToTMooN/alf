@@ -21,6 +21,7 @@ class TrainerConfig(object):
 
     def __init__(self,
                  root_dir,
+                 ext_root_dir=None,
                  ml_type='rl',
                  algorithm_ctor=None,
                  data_transformer_ctor=None,
@@ -199,6 +200,7 @@ class TrainerConfig(object):
                                              "be non-negative be")
         assert ml_type in ('rl', 'sl')
         self.root_dir = root_dir
+        self.ext_root_dir = ext_root_dir
         self.ml_type = ml_type
         self.algorithm_ctor = algorithm_ctor
         self.data_transformer_ctor = data_transformer_ctor

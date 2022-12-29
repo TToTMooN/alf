@@ -82,7 +82,8 @@ class Checkpointer(object):
              ignored_parameter_prefixes=[],
              including_optimizer=True,
              including_replay_buffer=True,
-             strict=True):
+             strict=True,
+             return_ckpt=False):
         """Load checkpoint
         Args:
             global_step (int|str): the number of training steps which is used to
@@ -198,6 +199,9 @@ class Checkpointer(object):
             map_location = torch.device('cpu')
 
         checkpoint = torch.load(f_path, map_location=map_location)
+        if return_ckpt:
+            return checkpoint
+
         if including_optimizer:
             opt_checkpoint = torch.load(
                 f_path + '-optimizer', map_location=map_location)
