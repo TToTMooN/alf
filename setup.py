@@ -48,7 +48,7 @@ setup(
         'torchtext == 0.9.1',
         'mujoco-py<2.1,>=2.0',
         'protobuf==3.20',
-        #'git+https://github.com/rlworkgroup/metaworld.git@master#egg=metaworld',
+        'metaworld@git+https://github.com/rlworkgroup/metaworld.git@master#egg=metaworld',
     ],  # And any other dependencies alf needs
     package_data={'': ['*.gin']},
     packages=find_packages(),
