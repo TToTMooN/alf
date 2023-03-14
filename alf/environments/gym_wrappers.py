@@ -21,6 +21,7 @@ import copy
 import cv2
 import gym
 import numpy as np
+import torch
 import random
 
 import alf
@@ -930,6 +931,52 @@ class ContinuousActionMapping(gym.ActionWrapper):
         action = alf.nest.map_structure_up_to(action, _scale_back, action,
                                               self._bounds,
                                               self._nested_action_space)
+        return action
+
+
+@alf.configurable
+class ContinuousTensorActionClip(gym.ActionWrapper):
+    """Clip continuous actions according to the action space.
+
+    Note that any action outside of the bounds specified by action_space will be
+    clipped to the bounds before passing to the underlying environment.
+    """
+
+    def __init__(self, env, min_v=-1.e9, max_v=1.e9):
+        """Create an ContinuousActionClip gym wrapper.
+
+        Args:
+            env (gym.Env): A Gym env instance to wrap
+        """
+        super(ContinuousTensorActionClip, self).__init__(env)
+
+        def _space_bounds(space):
+            if isinstance(space, gym.spaces.Box):
+                return np.maximum(space.low, min_v), np.minimum(
+                    space.high, max_v)
+            else:
+                return min_v, max_v
+
+        self._nested_action_space = _gym_space_to_nested_space(
+            self.action_space)
+        self.bounds = alf.nest.map_structure(_space_bounds,
+                                             self._nested_action_space)
+
+    def action(self, action):
+        def _clip_action(space, action, bounds):
+            # Check if the action is corrupted or not.
+            if torch.any(torch.isnan(action)):
+                raise ValueError(
+                    "NAN action detected! action: {}".format(action))
+            if isinstance(space, gym.spaces.Box):
+                action = torch.max(
+                    torch.min(action, torch.tensor(bounds[1])),
+                    torch.tensor(bounds[0]))
+            return action
+
+        action = alf.nest.map_structure_up_to(action, _clip_action,
+                                              self._nested_action_space,
+                                              action, self.bounds)
         return action
 
 

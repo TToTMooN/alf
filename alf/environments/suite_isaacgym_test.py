@@ -65,7 +65,6 @@ class SuiteIsaacGymTest(alf.test.TestCase):
         env = suite_isaacgym.load(cfg=cfg)
         self._env = env
         self.assertIsInstance(self._env, alf_environment.AlfEnvironment)
-        self.assertEqual(torch.float32, self._env.observation_spec().dtype)
         logging.info(
             "observation_spec: %s" % pprint.pformat(env.observation_spec()))
         logging.info("action_spec: %s" % pprint.pformat(env.action_spec()))
@@ -74,15 +73,14 @@ class SuiteIsaacGymTest(alf.test.TestCase):
 
         try:
             for _ in range(10):
-                action = action_spec.sample([env.batch_size])
+                action = action_spec.sample([env.num_envs])
                 logging.info("action: %s" % action)
                 for _ in range(10):
                     time_step = env.step(action)
                     # TODO: change logging
-                    logging.debug("goal: %s, gnss: %s reward=%s" %
-                                  (time_step.observation['goal'][0],
-                                   time_step.observation['gnss'][0],
-                                   float(time_step.reward[0][0])))
+                    logging.debug(
+                        "observation state: %s, reward=%s" %
+                        (time_step.observation['obs'], time_step.reward))
         except:
             raise NotImplementedError
 

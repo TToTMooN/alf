@@ -159,7 +159,7 @@ def wrap_isaac_gym_env(gym_env,
                        max_episode_steps=0,
                        gym_env_wrappers=(),
                        time_limit_wrapper=alf_wrappers.TimeLimit,
-                       normalize_action=True,
+                       normalize_action=False,
                        clip_action=True,
                        alf_env_wrappers=(),
                        image_channel_first=False,
@@ -213,11 +213,11 @@ def wrap_isaac_gym_env(gym_env,
 
     if normalize_action:
         # normalize continuous actions to [-1, 1]
-        gym_env = gym_wrappers.NormalizedAction(gym_env)
+        gym_env = gym_wrappers.NormalizedAction(gym_env)  # TODO: tensor action
 
     if clip_action:
         # clip continuous actions according to gym_env.action_space
-        gym_env = gym_wrappers.ContinuousActionClip(gym_env)
+        gym_env = gym_wrappers.ContinuousTensorActionClip(gym_env)
 
     env = alf_gym_wrapper.AlfIsaacGymWrapper(
         gym_env=gym_env,
@@ -226,8 +226,8 @@ def wrap_isaac_gym_env(gym_env,
         auto_reset=auto_reset,
     )
 
-    if max_episode_steps > 0:
-        env = time_limit_wrapper(env, max_episode_steps)
+    # if max_episode_steps > 0:
+    #     env = time_limit_wrapper(env, max_episode_steps)
 
     for wrapper in alf_env_wrappers:
         env = wrapper(env)

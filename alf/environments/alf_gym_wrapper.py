@@ -280,6 +280,16 @@ class AlfGymWrapper(AlfEnvironment):
 
 
 class AlfIsaacGymWrapper(AlfGymWrapper):
+    def __init__(self,
+                 gym_env,
+                 env_id=None,
+                 discount=1,
+                 auto_reset=True,
+                 simplify_box_bounds=True):
+        super().__init__(gym_env, env_id, discount, auto_reset,
+                         simplify_box_bounds)
+        self._observation_spec = {'obs': self._observation_spec}
+
     def _obtain_zero_info(self):
         """Get an env info of zeros only once when the env is created.
         This info will be filled in each ``FIRST`` time step as a placeholder.
@@ -296,14 +306,14 @@ class AlfIsaacGymWrapper(AlfGymWrapper):
     def _obtain_gym_env_zero_action(self):
         """Get zero action from gym environment directly if exist"""
         if hasattr(self._gym_env, "zero_actions"):
-            return self._gym_env.zero_actions().cpu().numpy()
+            return self._gym_env.zero_actions()
         else:
             return nest.map_structure(lambda spec: spec.numpy_zeros(),
                                       self._action_spec)
 
     def _step(self, action):
         # Automatically reset the environments on step if they need to be reset.
-        if self._auto_reset and self._done:
+        if self._auto_reset:  # and self._done:
             return self.reset()
 
         observation, reward, self._done, self._info = self._gym_env.step(
@@ -311,7 +321,7 @@ class AlfIsaacGymWrapper(AlfGymWrapper):
         observation = self._to_spec_dtype_observation(observation)
         self._info = _as_array(self._info)
 
-        if self._done:
+        if False:  # TODO: if self._done: done batchwise
             return ds.termination(
                 observation,
                 action,
@@ -340,12 +350,10 @@ class AlfIsaacGymWrapper(AlfGymWrapper):
         """
 
         def _as_spec_dtype(arr, spec):
-            print(arr)
-            dtype = torch_dtype_to_str(spec.dtype)
-            if str(arr.dtype) == dtype:
+            if arr.dtype == spec.dtype:
                 return arr
             else:
-                return arr.astype(dtype)
+                return arr.type(spec.dtype)
 
         return nest.map_structure(_as_spec_dtype, observation,
                                   self._observation_spec)

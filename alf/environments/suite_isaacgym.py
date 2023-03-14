@@ -62,7 +62,8 @@ class TensorAction(gym.ActionWrapper):
         super(TensorAction, self).__init__(env)
 
     def action(self, action):
-        action = torch.from_numpy(action)
+        if type(action) == np.ndarray:
+            action = torch.from_numpy(action)
         return action
 
 
@@ -102,7 +103,7 @@ def load(cfg,
         cfg,
     )
 
-    env = TensorAction(env)
+    # env = TensorAction(env)
 
     if not max_episode_steps:  # None or 0
         max_episode_steps = env.max_episode_length
