@@ -277,3 +277,75 @@ class AlfGymWrapper(AlfEnvironment):
 
     def render(self, mode='rgb_array'):
         return self._gym_env.render(mode)
+
+
+class AlfIsaacGymWrapper(AlfGymWrapper):
+    def _obtain_zero_info(self):
+        """Get an env info of zeros only once when the env is created.
+        This info will be filled in each ``FIRST`` time step as a placeholder.
+        """
+        self._gym_env.reset()
+        action = self._obtain_gym_env_zero_action()
+        _, _, _, info = self._gym_env.step(action)
+        self._gym_env.reset()
+        info = _as_array(info)
+        # TODO: fix hard code for isaacgym
+        return nest.map_structure(lambda a: np.zeros_like(a.cpu().numpy()),
+                                  info)
+
+    def _obtain_gym_env_zero_action(self):
+        """Get zero action from gym environment directly if exist"""
+        if hasattr(self._gym_env, "zero_actions"):
+            return self._gym_env.zero_actions().cpu().numpy()
+        else:
+            return nest.map_structure(lambda spec: spec.numpy_zeros(),
+                                      self._action_spec)
+
+    def _step(self, action):
+        # Automatically reset the environments on step if they need to be reset.
+        if self._auto_reset and self._done:
+            return self.reset()
+
+        observation, reward, self._done, self._info = self._gym_env.step(
+            action)
+        observation = self._to_spec_dtype_observation(observation)
+        self._info = _as_array(self._info)
+
+        if self._done:
+            return ds.termination(
+                observation,
+                action,
+                reward,
+                self._reward_spec,
+                self._env_id,
+                env_info=self._info)
+        else:
+            return ds.transition(
+                observation,
+                action,
+                reward,
+                self._reward_spec,
+                self._discount,
+                self._env_id,
+                env_info=self._info)
+
+    def _to_spec_dtype_observation(self, observation):
+        """Make sure observation from env is converted to the correct dtype.
+
+        Args:
+            observation (nested arrays or tensors): observations from env.
+
+        Returns:
+            A (nested) arrays of observation
+        """
+
+        def _as_spec_dtype(arr, spec):
+            print(arr)
+            dtype = torch_dtype_to_str(spec.dtype)
+            if str(arr.dtype) == dtype:
+                return arr
+            else:
+                return arr.astype(dtype)
+
+        return nest.map_structure(_as_spec_dtype, observation,
+                                  self._observation_spec)
